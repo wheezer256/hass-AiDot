@@ -280,3 +280,97 @@ async def test_optimistic_status_updates_after_command(monkeypatch):
     assert client.status.on is True
     assert client.status.dimming == 255
     assert seen and seen[-1] is client.status
+
+
+# --- firmware effects (EffectMode) ------------------------------------------
+
+_EFFECT_MODULE = {
+    "identity": "control.light.effect.mode",
+    "properties": [
+        {
+            "identity": "EffectMode",
+            "valueType": "enum",
+            "allowedValues": [
+                {"name": "Party", "value": 5},
+                {"name": "Bonfire", "value": 10},
+                {"name": "SOS", "value": 51},
+            ],
+        }
+    ],
+}
+
+
+def _make_effect_client() -> "bgc.BleGatewayDeviceClient":
+    device = {
+        "id": "devA",
+        "mac": "AA:BB",
+        "name": "Spot 1",
+        "product": {"serviceModules": [_EFFECT_MODULE]},
+        "properties": {},
+    }
+    hub = {
+        "id": "hub1",
+        "password": "pw",
+        "aesKey": ["testkey"],
+        "properties": {"ipAddress": "10.0.0.5"},
+    }
+    return bgc.BleGatewayDeviceClient(device, hub, "user1")
+
+
+def _written_attrs(writer: FakeWriter) -> list[dict]:
+    """Decode the attr payloads of setDevAttrReq frames written."""
+    out = []
+    for data in writer.writes:
+        msg = json.loads(bgc._aes_decrypt(data[8:], KEY))
+        if msg.get("method") == "setDevAttrReq":
+            out.append(msg["payload"]["attr"])
+    return out
+
+
+def test_effects_parsed_from_service_module():
+    """info.effects maps each advertised preset name to its int value."""
+    client = _make_effect_client()
+    assert client.info.effects == {"Party": 5, "Bonfire": 10, "SOS": 51}
+
+
+def test_no_effects_when_module_absent():
+    """A device without the effect module exposes no effects."""
+    client = _make_client()
+    assert client.info.effects == {}
+
+
+async def test_async_set_effect_sends_effectmode_int(monkeypatch):
+    """async_set_effect sends attr {EffectMode: <int>} and records the name."""
+    server = FakeServer([{"frames": [_login_frame(), _ack_frame()]}])
+    monkeypatch.setattr(bgc.asyncio, "open_connection", server.open_connection)
+
+    client = _make_effect_client()
+    await client.async_set_effect("Bonfire")
+
+    assert _written_attrs(server.writers[0]) == [{"EffectMode": 10}]
+    assert client.status.effect == "Bonfire"
+    assert client.status.on is True
+
+
+async def test_async_set_effect_unknown_raises(monkeypatch):
+    """An unknown effect name is rejected before any command is sent."""
+    server = FakeServer([{"frames": [_login_frame(), _ack_frame()]}])
+    monkeypatch.setattr(bgc.asyncio, "open_connection", server.open_connection)
+
+    client = _make_effect_client()
+    with pytest.raises(ValueError):
+        await client.async_set_effect("Nope")
+    assert server.connect_count == 0
+
+
+async def test_brightness_clears_active_effect(monkeypatch):
+    """Selecting brightness exits the firmware effect (status.effect -> None)."""
+    server = FakeServer([{"frames": [_login_frame(), _ack_frame(), _ack_frame()]}])
+    monkeypatch.setattr(bgc.asyncio, "open_connection", server.open_connection)
+
+    client = _make_effect_client()
+    await client.async_set_effect("Party")
+    assert client.status.effect == "Party"
+
+    await client.async_set_brightness(128)
+    assert client.status.effect is None

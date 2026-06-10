@@ -5,9 +5,11 @@ from typing import Any
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_EFFECT,
     ATTR_RGBW_COLOR,
     ColorMode,
     LightEntity,
+    LightEntityFeature,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
@@ -68,6 +70,11 @@ class AidotLight(CoordinatorEntity[AidotDeviceUpdateCoordinator], LightEntity):
         else:
             self._attr_color_mode = ColorMode.BRIGHTNESS
             self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+
+        effects = coordinator.device_client.info.effects
+        if effects:
+            self._attr_supported_features = LightEntityFeature.EFFECT
+            self._attr_effect_list = list(effects)
         self._update_status()
 
     def _update_status(self) -> None:
@@ -76,6 +83,7 @@ class AidotLight(CoordinatorEntity[AidotDeviceUpdateCoordinator], LightEntity):
         self._attr_brightness = self.coordinator.data.dimming
         self._attr_color_temp_kelvin = self.coordinator.data.cct
         self._attr_rgbw_color = self.coordinator.data.rgbw
+        self._attr_effect = self.coordinator.data.effect
 
     @property
     def available(self) -> bool:
@@ -90,7 +98,10 @@ class AidotLight(CoordinatorEntity[AidotDeviceUpdateCoordinator], LightEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on, applying brightness, color temperature, RGBW, or plain on."""
-        if ATTR_BRIGHTNESS in kwargs:
+        if ATTR_EFFECT in kwargs:
+            effect = kwargs[ATTR_EFFECT]
+            await self.coordinator.device_client.async_set_effect(effect)
+        elif ATTR_BRIGHTNESS in kwargs:
             brightness = kwargs.get(ATTR_BRIGHTNESS, 255)
             await self.coordinator.device_client.async_set_brightness(brightness)
             self.coordinator.data.dimming = brightness
@@ -112,6 +123,7 @@ class AidotLight(CoordinatorEntity[AidotDeviceUpdateCoordinator], LightEntity):
 
         self.coordinator.data.on = True
         self._attr_is_on = True
+        self._attr_effect = self.coordinator.data.effect
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:

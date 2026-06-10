@@ -58,6 +58,7 @@ class BleDeviceInfo:
     enable_cct: bool
     cct_min: int = 2700
     cct_max: int = 6500
+    effects: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -67,6 +68,7 @@ class BleDeviceStatus:
     dimming: int = 255
     cct: int = 2700
     rgbw: tuple[int, int, int, int] = field(default_factory=lambda: (255, 255, 255, 0))
+    effect: str | None = None
 
 
 _seq = 0
@@ -228,6 +230,7 @@ class BleGatewayDeviceClient:
         enable_cct = "control.light.cct" in modules
 
         cct_min, cct_max = 2700, 6500
+        effects: dict[str, int] = {}
         for m in device.get("product", {}).get("serviceModules", []):
             if m["identity"] == "control.light.cct":
                 for p in m.get("properties", []):
@@ -237,6 +240,17 @@ class BleGatewayDeviceClient:
                             cct_max = int(p.get("maxValue", cct_max))
                         except (ValueError, TypeError):
                             pass
+            elif m["identity"] == "control.light.effect.mode":
+                for p in m.get("properties", []):
+                    if p.get("identity") == "EffectMode":
+                        for av in p.get("allowedValues", []):
+                            try:
+                                effects[av["name"]] = int(av["value"])
+                            except (KeyError, ValueError, TypeError):
+                                pass
+
+        # Reverse map (value -> name) for reconciling reported EffectMode.
+        self._effect_names = {v: k for k, v in effects.items()}
 
         self.info = BleDeviceInfo(
             dev_id=self._device_id,
@@ -248,12 +262,18 @@ class BleGatewayDeviceClient:
             enable_cct=enable_cct,
             cct_min=cct_min,
             cct_max=cct_max,
+            effects=effects,
         )
 
         props = device.get("properties", {})
         raw_dim = int(props.get("Dimming", 100))
         raw_rgbw = int(props.get("RGBW", 0))
         rgbw_u = ctypes.c_uint32(raw_rgbw).value
+
+        try:
+            raw_effect = int(props["EffectMode"])
+        except (KeyError, ValueError, TypeError):
+            raw_effect = None
 
         self.status = BleDeviceStatus(
             online=True,
@@ -266,6 +286,7 @@ class BleGatewayDeviceClient:
                 (rgbw_u >> 8) & 0xFF,
                 rgbw_u & 0xFF,
             ),
+            effect=self._effect_names.get(raw_effect),
         )
         self.on_status_update: Any = None
 
@@ -279,12 +300,20 @@ class BleGatewayDeviceClient:
         )
         await session.send_command(self._device_id, attr)
 
+        if "EffectMode" in attr:
+            self.status.effect = self._effect_names.get(attr["EffectMode"])
+            if self.status.effect is not None:
+                self.status.on = True
         if "OnOff" in attr:
             self.status.on = bool(attr["OnOff"])
+            if not self.status.on:
+                self.status.effect = None
         if "Dimming" in attr:
             self.status.dimming = int(attr["Dimming"] * 255 / 100)
+            self.status.effect = None
         if "CCT" in attr:
             self.status.cct = attr["CCT"]
+            self.status.effect = None
         if "RGBW" in attr:
             packed = ctypes.c_uint32(attr["RGBW"]).value
             self.status.rgbw = (
@@ -293,6 +322,7 @@ class BleGatewayDeviceClient:
                 (packed >> 8) & 0xFF,
                 packed & 0xFF,
             )
+            self.status.effect = None
         if self.on_status_update:
             self.on_status_update(self.status)
 
@@ -308,6 +338,11 @@ class BleGatewayDeviceClient:
     async def async_set_rgbw(self, rgbw: tuple[int, int, int, int]) -> None:
         packed = (rgbw[0] << 24) | (rgbw[1] << 16) | (rgbw[2] << 8) | rgbw[3]
         await self._send({"OnOff": 1, "RGBW": ctypes.c_int32(packed).value})
+
+    async def async_set_effect(self, effect: str) -> None:
+        if effect not in self.info.effects:
+            raise ValueError(f"unknown effect {effect!r}")
+        await self._send({"EffectMode": self.info.effects[effect]})
 
     async def async_set_cct(self, cct: int) -> None:
         await self._send({"OnOff": 1, "CCT": cct})
